@@ -2,7 +2,44 @@ export function loadCookies(): Record<string, string> {
   const result: Record<string, string> = {};
 
   // --------------------------------------------------
-  // TERABOX_COOKIE from Railway
+  // 1. COOKIE_JSON from Railway
+  // --------------------------------------------------
+
+  const cookieJson = process.env.COOKIE_JSON;
+
+  if (cookieJson) {
+    try {
+      const parsed = JSON.parse(cookieJson);
+
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed)
+      ) {
+        for (const [name, value] of Object.entries(parsed)) {
+          if (
+            typeof value === "string" &&
+            value.length > 0
+          ) {
+            result[name] = value;
+          }
+        }
+      }
+
+      console.log(
+        "[COOKIES] COOKIE_JSON loaded:",
+        Object.keys(result),
+      );
+    } catch (error) {
+      console.log(
+        "[COOKIES] COOKIE_JSON parse failed:",
+        error,
+      );
+    }
+  }
+
+  // --------------------------------------------------
+  // 2. TERABOX_COOKIE / TERABOX_COOKIES / COOKIE
   // --------------------------------------------------
 
   const envCookie =
@@ -16,8 +53,11 @@ export function loadCookies(): Record<string, string> {
 
       if (index === -1) continue;
 
-      const name = part.slice(0, index).trim();
-      const value = part.slice(index + 1).trim();
+      const name =
+        part.slice(0, index).trim();
+
+      const value =
+        part.slice(index + 1).trim();
 
       if (name && value) {
         result[name] = value;
@@ -26,7 +66,7 @@ export function loadCookies(): Record<string, string> {
   }
 
   // --------------------------------------------------
-  // Individual cookie variables
+  // 3. Individual Railway cookie variables
   // --------------------------------------------------
 
   const possibleCookies = [
@@ -35,6 +75,8 @@ export function loadCookies(): Record<string, string> {
     "STOKEN",
     "BAIDUID",
     "PANPSC",
+    "BOXCLND",
+    "sekey",
   ];
 
   for (const name of possibleCookies) {
@@ -44,6 +86,11 @@ export function loadCookies(): Record<string, string> {
       result[name] = value;
     }
   }
+
+  console.log(
+    "[COOKIES] Final cookies:",
+    Object.keys(result),
+  );
 
   return result;
 }
@@ -93,7 +140,6 @@ export function isValidShareUrl(
       "terasharelink.com",
       "www.terasharelink.com",
 
-      "terabox.app",
       "dm.terabox.app",
     ];
 
@@ -164,11 +210,18 @@ export function extractSurl(
 // --------------------------------------------------
 
 export function formatBytes(
-  value: number | string | null | undefined,
+  value:
+    | number
+    | string
+    | null
+    | undefined,
 ): string {
   const bytes = Number(value);
 
-  if (!Number.isFinite(bytes) || bytes <= 0) {
+  if (
+    !Number.isFinite(bytes) ||
+    bytes <= 0
+  ) {
     return "0 Bytes";
   }
 
@@ -183,13 +236,17 @@ export function formatBytes(
 
   const index = Math.min(
     Math.floor(
-      Math.log(bytes) / Math.log(1024),
+      Math.log(bytes) /
+        Math.log(1024),
     ),
     units.length - 1,
   );
 
   const size =
-    bytes / Math.pow(1024, index);
+    bytes /
+    Math.pow(1024, index);
 
-  return `${size.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+  return `${size.toFixed(
+    index === 0 ? 0 : 2,
+  )} ${units[index]}`;
 }
