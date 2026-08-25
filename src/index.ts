@@ -1,149 +1,216 @@
-import { tera } from "./lib/terabox";
-import { isValidShareUrl, extractSurl, formatBytes } from "./lib/utils";
+import fs from "fs";
+import path from "path";
+import { URL } from "url";
 
-const port = process.env.PORT || 5000;
+export const ALLOWED_HOSTS = new Set([
+  // TeraBox
+  "terabox.com",
+  "www.terabox.com",
+  "terabox.app",
+  "www.terabox.app",
+  "dm.terabox.app",
 
-const cache = new Map<string, { data: any; expiry: number }>();
-const CACHE_DURATION = 2 * 60 * 60 * 1000;
+  // TeraBox sharing domains
+  "terasharefile.com",
+  "www.terasharefile.com",
+  "teraboxshare.com",
+  "www.teraboxshare.com",
+  "teraboxlink.com",
+  "www.teraboxlink.com",
+  "1024terabox.com",
+  "www.1024terabox.com",
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+  // Other known TeraBox domains
+  "teraboxurl.com",
+  "www.teraboxurl.com",
+]);
 
-Bun.serve({
-  port,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const pathname = url.pathname;
+export function loadCookies(): Record<string, string> {
+  let data: Record<string, any> | null = null;
 
-    if (req.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+  const cookieJson = process.env.COOKIE_JSON;
+
+  if (cookieJson) {
+    try {
+      data = JSON.parse(cookieJson);
+    } catch {
+      const trimmed = cookieJson.trim();
+
+      if (trimmed) {
+        data = {
+          ndus: trimmed,
+        };
+      }
     }
+  }
 
-    if (pathname === "/") {
-      return Response.json(
-        {
-          name: "TeraBox API",
-          version: "3.0",
-          status: "operational",
-          endpoints: {
-            "/api": "Fetch files from Terabox link",
-          },
-          timestamp: new Date().toISOString(),
-        },
-        { headers: corsHeaders },
-      );
-    }
+  if (!data) {
+    const raw = process.env.TERABOX_COOKIES_JSON;
 
-    if (pathname === "/api") {
+    if (raw) {
       try {
-        const startTime = Date.now();
-        const targetUrlRaw = url.searchParams.get("url");
+        data = JSON.parse(raw);
+      } catch {
+        data = null;
+      }
+    }
+  }
 
-        if (!targetUrlRaw || !targetUrlRaw.trim()) {
-          return Response.json(
-            {
-              status: "error",
-              message: "Missing required parameter: url",
-              example: "/api?url=https://terabox.app/s/1HSEb8PZRUE7Z1Tvd3ZtT0g",
-            },
-            { status: 400, headers: corsHeaders },
+  if (!data) {
+    const filePath = process.env.TERABOX_COOKIES_FILE;
+
+    if (filePath) {
+      try {
+        const resolvedPath = path.resolve(filePath);
+
+        if (fs.existsSync(resolvedPath)) {
+          const fileContent = fs.readFileSync(
+            resolvedPath,
+            "utf-8",
           );
+
+          data = JSON.parse(fileContent);
         }
+      } catch {
+        data = null;
+      }
+    }
+  }
 
-        const targetUrl = targetUrlRaw.trim();
+  if (data && typeof data === "object") {
+    const result: Record<string, string> = {};
 
-        if (!targetUrl.startsWith("http") || !isValidShareUrl(targetUrl)) {
-          return Response.json(
-            {
-              status: "error",
-              url: targetUrl,
-              message: "Invalid TeraBox share URL",
-            },
-            { status: 400, headers: corsHeaders },
-          );
-        }
-
-        const surl = extractSurl(targetUrl);
-        if (!surl) {
-          return Response.json(
-            {
-              status: "error",
-              url: targetUrl,
-              message: "Could not extract surl from URL",
-            },
-            { status: 400, headers: corsHeaders },
-          );
-        }
-
-        let data;
-        const cached = cache.get(surl);
-        if (cached && Date.now() < cached.expiry) {
-          data = cached.data;
-        } else {
-          data = await tera(surl);
-          cache.set(surl, { data, expiry: Date.now() + CACHE_DURATION });
-        }
-        const responseTime = ((Date.now() - startTime) / 1000).toFixed(3) + "s";
-
-        if (data && data.error) {
-          return Response.json(
-            {
-              status: "error",
-              url: targetUrl,
-              surl: surl,
-              error: data.error,
-              response_time: responseTime,
-              timestamp: new Date().toISOString(),
-            },
-            { status: 400, headers: corsHeaders },
-          );
-        }
-
-        let filename;
-        let size;
-        let download;
-        let thumbs;
-
-        if (data && data.list && data.list.length > 0) {
-          const firstItem = data.list[0];
-          filename = firstItem.server_filename;
-          size = formatBytes(firstItem.size);
-          download = firstItem.dlink;
-          thumbs = firstItem.thumbs;
-        }
-
-        return Response.json(
-          {
-            status: "success",
-            response_time: responseTime,
-            url: targetUrl,
-            ...(filename && { filename }),
-            ...(size && { size }),
-            ...(download && { download }),
-            ...(thumbs && { thumbs }),
-          },
-          { headers: corsHeaders },
-        );
-      } catch (error: any) {
-        return Response.json(
-          {
-            status: "error",
-            message: String(error),
-            url: url.searchParams.get("url"),
-          },
-          { status: 500, headers: corsHeaders },
-        );
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined && value !== null) {
+        result[key] = String(value);
       }
     }
 
-    return Response.json(
-      { error: "Not Found" },
-      { status: 404, headers: corsHeaders },
-    );
-  },
-});
+    return result;
+  }
 
-console.log(`Bun server running on port ${port}`);
+  return {};
+}
+
+export function isValidShareUrl(input: string): boolean {
+  try {
+    const parsed = new URL(input.trim());
+
+    if (
+      parsed.protocol !== "http:" &&
+      parsed.protocol !== "https:"
+    ) {
+      return false;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+
+    if (!ALLOWED_HOSTS.has(host)) {
+      return false;
+    }
+
+    // /s/xxxxxx
+    if (/\/s\/[^/?#]+/i.test(parsed.pathname)) {
+      return true;
+    }
+
+    // ?surl=xxxxxx
+    if (parsed.searchParams.get("surl")) {
+      return true;
+    }
+
+    // Some TeraBox links can contain the share code elsewhere
+    if (
+      parsed.pathname.includes("/share/") ||
+      parsed.pathname.includes("/wap/share/")
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function extractSurl(input: string): string | null {
+  try {
+    const parsed = new URL(input.trim());
+
+    // ?surl=xxxxx
+    const surlParam = parsed.searchParams.get("surl");
+
+    if (surlParam) {
+      return surlParam.trim();
+    }
+
+    // /s/xxxxx
+    const shareMatch = parsed.pathname.match(
+      /\/s\/([^/?#]+)/i,
+    );
+
+    if (shareMatch?.[1]) {
+      return shareMatch[1].trim();
+    }
+
+    // /share/xxxxx
+    const shareMatch2 = parsed.pathname.match(
+      /\/share\/([^/?#]+)/i,
+    );
+
+    if (shareMatch2?.[1]) {
+      return shareMatch2[1].trim();
+    }
+
+    // /wap/share/xxxxx
+    const shareMatch3 = parsed.pathname.match(
+      /\/wap\/share\/([^/?#]+)/i,
+    );
+
+    if (shareMatch3?.[1]) {
+      return shareMatch3[1].trim();
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function formatBytes(
+  bytes: number | string,
+  decimals = 2,
+): string {
+  const b =
+    typeof bytes === "string"
+      ? Number.parseInt(bytes, 10)
+      : bytes;
+
+  if (!Number.isFinite(b) || b <= 0) {
+    return "0 Bytes";
+  }
+
+  const k = 1024;
+
+  const dm = Math.max(0, decimals);
+
+  const sizes = [
+    "Bytes",
+    "KB",
+    "MB",
+    "GB",
+    "TB",
+    "PB",
+    "EB",
+    "ZB",
+    "YB",
+  ];
+
+  const i = Math.floor(
+    Math.log(b) / Math.log(k),
+  );
+
+  return `${Number(
+    (b / Math.pow(k, i)).toFixed(dm),
+  )} ${sizes[i]}`;
+}
