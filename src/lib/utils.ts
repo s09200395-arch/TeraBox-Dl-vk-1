@@ -6,14 +6,14 @@ export const ALLOWED_HOSTS = new Set([
   "terabox.app",
   "www.terabox.app",
 
+  "teraboxshare.com",
+  "www.teraboxshare.com",
+
   "terabox.com",
   "www.terabox.com",
 
   "1024terabox.com",
   "www.1024terabox.com",
-
-  "teraboxshare.com",
-  "www.teraboxshare.com",
 
   "teraboxlink.com",
   "www.teraboxlink.com",
@@ -49,7 +49,9 @@ export function loadCookies(): Record<string, string> {
     if (raw) {
       try {
         data = JSON.parse(raw);
-      } catch {}
+      } catch {
+        // Ignore invalid JSON
+      }
     }
   }
 
@@ -68,7 +70,9 @@ export function loadCookies(): Record<string, string> {
 
           data = JSON.parse(fileContent);
         }
-      } catch {}
+      } catch {
+        // Ignore cookie file errors
+      }
     }
   }
 
@@ -76,7 +80,9 @@ export function loadCookies(): Record<string, string> {
     const result: Record<string, string> = {};
 
     for (const [key, value] of Object.entries(data)) {
-      result[key] = String(value);
+      if (value !== undefined && value !== null) {
+        result[key] = String(value);
+      }
     }
 
     return result;
@@ -90,8 +96,9 @@ export function isValidShareUrl(u: string): boolean {
     const parsed = new URL(u);
 
     if (
-      parsed.protocol !== "http:" &&
-      parsed.protocol !== "https:"
+      !["http:", "https:"].includes(
+        parsed.protocol
+      )
     ) {
       return false;
     }
@@ -102,15 +109,10 @@ export function isValidShareUrl(u: string): boolean {
       return false;
     }
 
-    const hasSharePath =
-      parsed.pathname
-        .toLowerCase()
-        .includes("/s/");
-
-    const hasSurl =
-      parsed.searchParams.has("surl");
-
-    return hasSharePath || hasSurl;
+    return (
+      parsed.pathname.includes("/s/") ||
+      parsed.searchParams.has("surl")
+    );
   } catch {
     return false;
   }
@@ -122,11 +124,10 @@ export function extractSurl(
   try {
     const parsed = new URL(url);
 
-    const querySurl =
-      parsed.searchParams.get("surl");
+    const surl = parsed.searchParams.get("surl");
 
-    if (querySurl) {
-      return querySurl;
+    if (surl) {
+      return surl;
     }
 
     const match = parsed.pathname.match(
@@ -159,7 +160,9 @@ export function formatBytes(
   const k = 1024;
 
   const dm =
-    decimals < 0 ? 0 : decimals;
+    decimals < 0
+      ? 0
+      : decimals;
 
   const sizes = [
     "Bytes",
@@ -177,12 +180,7 @@ export function formatBytes(
     Math.log(b) / Math.log(k)
   );
 
-  const index = Math.min(
-    i,
-    sizes.length - 1
-  );
-
   return `${parseFloat(
-    (b / Math.pow(k, index)).toFixed(dm)
-  )} ${sizes[index]}`;
+    (b / Math.pow(k, i)).toFixed(dm)
+  )} ${sizes[i]}`;
 }
