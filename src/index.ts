@@ -1,216 +1,297 @@
-import fs from "fs";
-import path from "path";
-import { URL } from "url";
+import { tera } from "./lib/terabox";
+import {
+  isValidShareUrl,
+  extractSurl,
+  formatBytes,
+} from "./lib/utils";
 
-export const ALLOWED_HOSTS = new Set([
-  // TeraBox
-  "terabox.com",
-  "www.terabox.com",
-  "terabox.app",
-  "www.terabox.app",
-  "dm.terabox.app",
+const PORT = Number(process.env.PORT || 8080);
+const HOST = "0.0.0.0";
 
-  // TeraBox sharing domains
-  "terasharefile.com",
-  "www.terasharefile.com",
-  "teraboxshare.com",
-  "www.teraboxshare.com",
-  "teraboxlink.com",
-  "www.teraboxlink.com",
-  "1024terabox.com",
-  "www.1024terabox.com",
+const cache = new Map<
+  string,
+  {
+    data: any;
+    expiry: number;
+  }
+>();
 
-  // Other known TeraBox domains
-  "teraboxurl.com",
-  "www.teraboxurl.com",
-]);
+const CACHE_DURATION =
+  2 * 60 * 60 * 1000;
 
-export function loadCookies(): Record<string, string> {
-  let data: Record<string, any> | null = null;
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods":
+    "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type",
+};
 
-  const cookieJson = process.env.COOKIE_JSON;
+function json(
+  data: any,
+  status = 200,
+) {
+  return Response.json(data, {
+    status,
+    headers: corsHeaders,
+  });
+}
 
-  if (cookieJson) {
+console.log(
+  `[SERVER] Starting on ${HOST}:${PORT}`,
+);
+
+const server = Bun.serve({
+  hostname: HOST,
+  port: PORT,
+
+  async fetch(req) {
     try {
-      data = JSON.parse(cookieJson);
-    } catch {
-      const trimmed = cookieJson.trim();
+      const url = new URL(req.url);
+      const pathname = url.pathname;
 
-      if (trimmed) {
-        data = {
-          ndus: trimmed,
-        };
+      if (req.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders,
+        });
       }
-    }
-  }
 
-  if (!data) {
-    const raw = process.env.TERABOX_COOKIES_JSON;
-
-    if (raw) {
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        data = null;
+      // Health check
+      if (
+        pathname === "/" ||
+        pathname === "/health"
+      ) {
+        return json({
+          status: "ok",
+          service: "TeraBox Downloader API",
+          version: "4.0",
+          server: "online",
+          timestamp:
+            new Date().toISOString(),
+        });
       }
-    }
-  }
 
-  if (!data) {
-    const filePath = process.env.TERABOX_COOKIES_FILE;
+      if (pathname !== "/api") {
+        return json(
+          {
+            status: "error",
+            message: "Endpoint not found",
+          },
+          404,
+        );
+      }
 
-    if (filePath) {
-      try {
-        const resolvedPath = path.resolve(filePath);
+      const started = Date.now();
 
-        if (fs.existsSync(resolvedPath)) {
-          const fileContent = fs.readFileSync(
-            resolvedPath,
-            "utf-8",
-          );
+      const rawUrl =
+        url.searchParams.get("url");
 
-          data = JSON.parse(fileContent);
+      if (!rawUrl) {
+        return json(
+          {
+            status: "error",
+            message:
+              "Missing required parameter: url",
+            example:
+              "/api?url=https://terasharefile.com/s/example",
+          },
+          400,
+        );
+      }
+
+      const targetUrl =
+        rawUrl.trim();
+
+      console.log(
+        "[API] Requested:",
+        targetUrl,
+      );
+
+      if (
+        !isValidShareUrl(targetUrl)
+      ) {
+        return json(
+          {
+            status: "error",
+            url: targetUrl,
+            message:
+              "Invalid TeraBox share URL",
+          },
+          400,
+        );
+      }
+
+      const surl =
+        extractSurl(targetUrl);
+
+      if (!surl) {
+        return json(
+          {
+            status: "error",
+            url: targetUrl,
+            message:
+              "Could not extract share ID",
+          },
+          400,
+        );
+      }
+
+      console.log(
+        "[API] Extracted surl:",
+        surl,
+      );
+
+      let data: any;
+
+      const cached =
+        cache.get(surl);
+
+      if (
+        cached &&
+        Date.now() < cached.expiry
+      ) {
+        console.log(
+          "[CACHE] Using cached result",
+        );
+
+        data = cached.data;
+      } else {
+        console.log(
+          "[TERABOX] Fetching...",
+        );
+
+        data = await tera(surl);
+
+        if (data) {
+          cache.set(surl, {
+            data,
+            expiry:
+              Date.now() +
+              CACHE_DURATION,
+          });
         }
-      } catch {
-        data = null;
       }
-    }
-  }
 
-  if (data && typeof data === "object") {
-    const result: Record<string, string> = {};
+      const responseTime =
+        (
+          (Date.now() - started) /
+          1000
+        ).toFixed(3) + "s";
 
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined && value !== null) {
-        result[key] = String(value);
+      if (!data) {
+        return json(
+          {
+            status: "error",
+            message:
+              "Empty response from TeraBox",
+            response_time:
+              responseTime,
+          },
+          502,
+        );
       }
+
+      if (data.error) {
+        console.error(
+          "[TERABOX ERROR]",
+          data.error,
+        );
+
+        return json(
+          {
+            status: "error",
+            url: targetUrl,
+            surl,
+            message: data.error,
+            response_time:
+              responseTime,
+            timestamp:
+              new Date().toISOString(),
+          },
+          502,
+        );
+      }
+
+      const list =
+        Array.isArray(data.list)
+          ? data.list
+          : [];
+
+      if (list.length === 0) {
+        return json({
+          status: "success",
+          url: targetUrl,
+          surl,
+          files: [],
+          message:
+            "No files returned by TeraBox",
+          response_time:
+            responseTime,
+        });
+      }
+
+      const files = list.map(
+        (item: any) => ({
+          filename:
+            item.server_filename ||
+            item.filename ||
+            "Unknown",
+
+          size:
+            item.size !== undefined
+              ? formatBytes(item.size)
+              : "Unknown",
+
+          download:
+            item.dlink ||
+            item.download_url ||
+            null,
+
+          thumbnail:
+            item.thumbs?.url3 ||
+            item.thumbs?.url2 ||
+            item.thumbs?.url1 ||
+            item.thumbs ||
+            null,
+        }),
+      );
+
+      const first = files[0];
+
+      return json({
+        status: "success",
+        url: targetUrl,
+        surl,
+        filename: first.filename,
+        size: first.size,
+        download: first.download,
+        thumbs: first.thumbnail,
+        files,
+        response_time:
+          responseTime,
+        timestamp:
+          new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error(
+        "[SERVER ERROR]",
+        error,
+      );
+
+      return json(
+        {
+          status: "error",
+          message:
+            error?.message ||
+            String(error),
+        },
+        500,
+      );
     }
+  },
+});
 
-    return result;
-  }
-
-  return {};
-}
-
-export function isValidShareUrl(input: string): boolean {
-  try {
-    const parsed = new URL(input.trim());
-
-    if (
-      parsed.protocol !== "http:" &&
-      parsed.protocol !== "https:"
-    ) {
-      return false;
-    }
-
-    const host = parsed.hostname.toLowerCase();
-
-    if (!ALLOWED_HOSTS.has(host)) {
-      return false;
-    }
-
-    // /s/xxxxxx
-    if (/\/s\/[^/?#]+/i.test(parsed.pathname)) {
-      return true;
-    }
-
-    // ?surl=xxxxxx
-    if (parsed.searchParams.get("surl")) {
-      return true;
-    }
-
-    // Some TeraBox links can contain the share code elsewhere
-    if (
-      parsed.pathname.includes("/share/") ||
-      parsed.pathname.includes("/wap/share/")
-    ) {
-      return true;
-    }
-
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-export function extractSurl(input: string): string | null {
-  try {
-    const parsed = new URL(input.trim());
-
-    // ?surl=xxxxx
-    const surlParam = parsed.searchParams.get("surl");
-
-    if (surlParam) {
-      return surlParam.trim();
-    }
-
-    // /s/xxxxx
-    const shareMatch = parsed.pathname.match(
-      /\/s\/([^/?#]+)/i,
-    );
-
-    if (shareMatch?.[1]) {
-      return shareMatch[1].trim();
-    }
-
-    // /share/xxxxx
-    const shareMatch2 = parsed.pathname.match(
-      /\/share\/([^/?#]+)/i,
-    );
-
-    if (shareMatch2?.[1]) {
-      return shareMatch2[1].trim();
-    }
-
-    // /wap/share/xxxxx
-    const shareMatch3 = parsed.pathname.match(
-      /\/wap\/share\/([^/?#]+)/i,
-    );
-
-    if (shareMatch3?.[1]) {
-      return shareMatch3[1].trim();
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export function formatBytes(
-  bytes: number | string,
-  decimals = 2,
-): string {
-  const b =
-    typeof bytes === "string"
-      ? Number.parseInt(bytes, 10)
-      : bytes;
-
-  if (!Number.isFinite(b) || b <= 0) {
-    return "0 Bytes";
-  }
-
-  const k = 1024;
-
-  const dm = Math.max(0, decimals);
-
-  const sizes = [
-    "Bytes",
-    "KB",
-    "MB",
-    "GB",
-    "TB",
-    "PB",
-    "EB",
-    "ZB",
-    "YB",
-  ];
-
-  const i = Math.floor(
-    Math.log(b) / Math.log(k),
-  );
-
-  return `${Number(
-    (b / Math.pow(k, i)).toFixed(dm),
-  )} ${sizes[i]}`;
-}
+console.log(
+  `[SERVER] TeraBox API running on http://${HOST}:${server.port}`,
+);
