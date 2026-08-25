@@ -1,138 +1,156 @@
-import fs from "fs";
-import path from "path";
-import { URL } from "url";
-
-export const ALLOWED_HOSTS = new Set([
-  "terabox.com",
-  "www.terabox.com",
-
-  "terabox.app",
-  "www.terabox.app",
-
-  "1024terabox.com",
-  "www.1024terabox.com",
-
-  "teraboxshare.com",
-  "www.teraboxshare.com",
-
-  "teraboxlink.com",
-  "www.teraboxlink.com",
-
-  "terasharefile.com",
-  "www.terasharefile.com",
-
-  "terafileshare.com",
-  "www.terafileshare.com",
-
-  "terasharelink.com",
-  "www.terasharelink.com",
-
-  "dm.terabox.app",
-]);
-
 export function loadCookies(): Record<string, string> {
-  let data: Record<string, any> | null = null;
+  const result: Record<string, string> = {};
 
-  const cookieJson = process.env.COOKIE_JSON;
+  // --------------------------------------------------
+  // TERABOX_COOKIE from Railway
+  // --------------------------------------------------
 
-  if (cookieJson) {
-    try {
-      data = JSON.parse(cookieJson);
-    } catch {
-      const trimmed = cookieJson.trim();
+  const envCookie =
+    process.env.TERABOX_COOKIE ||
+    process.env.TERABOX_COOKIES ||
+    process.env.COOKIE;
 
-      if (trimmed) {
-        data = { ndus: trimmed };
+  if (envCookie) {
+    for (const part of envCookie.split(";")) {
+      const index = part.indexOf("=");
+
+      if (index === -1) continue;
+
+      const name = part.slice(0, index).trim();
+      const value = part.slice(index + 1).trim();
+
+      if (name && value) {
+        result[name] = value;
       }
     }
   }
 
-  if (!data) {
-    const raw = process.env.TERABOX_COOKIES_JSON;
+  // --------------------------------------------------
+  // Individual cookie variables
+  // --------------------------------------------------
 
-    if (raw) {
-      try {
-        data = JSON.parse(raw);
-      } catch {}
-    }
-  }
+  const possibleCookies = [
+    "ndus",
+    "BDUSS",
+    "STOKEN",
+    "BAIDUID",
+    "PANPSC",
+  ];
 
-  if (!data) {
-    const filePath = process.env.TERABOX_COOKIES_FILE;
+  for (const name of possibleCookies) {
+    const value = process.env[name];
 
-    if (filePath) {
-      try {
-        const resolved = path.resolve(filePath);
-
-        if (fs.existsSync(resolved)) {
-          const content = fs.readFileSync(resolved, "utf8");
-          data = JSON.parse(content);
-        }
-      } catch {}
-    }
-  }
-
-  if (!data || typeof data !== "object") {
-    return {};
-  }
-
-  const result: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined && value !== null) {
-      result[key] = String(value);
+    if (value) {
+      result[name] = value;
     }
   }
 
   return result;
 }
 
-export function isValidShareUrl(input: string): boolean {
+// --------------------------------------------------
+// Supported TeraBox share domains
+// --------------------------------------------------
+
+export function isValidShareUrl(
+  input: string,
+): boolean {
   try {
-    const parsed = new URL(input.trim());
+    const url = new URL(input);
 
-    if (!["http:", "https:"].includes(parsed.protocol)) {
+    if (
+      url.protocol !== "http:" &&
+      url.protocol !== "https:"
+    ) {
       return false;
     }
 
-    const host = parsed.hostname.toLowerCase();
+    const hostname =
+      url.hostname.toLowerCase();
 
-    if (!ALLOWED_HOSTS.has(host)) {
-      return false;
-    }
+    const supported = [
+      "terabox.app",
+      "www.terabox.app",
 
-    const pathname = parsed.pathname.toLowerCase();
+      "terabox.com",
+      "www.terabox.com",
 
-    const hasPathShare = /\/s\/[a-zA-Z0-9_-]+/.test(pathname);
+      "1024terabox.com",
+      "www.1024terabox.com",
 
-    const hasSurl =
-      parsed.searchParams.has("surl") &&
-      !!parsed.searchParams.get("surl");
+      "teraboxshare.com",
+      "www.teraboxshare.com",
 
-    return hasPathShare || hasSurl;
+      "teraboxlink.com",
+      "www.teraboxlink.com",
+
+      "terasharefile.com",
+      "www.terasharefile.com",
+
+      "terafileshare.com",
+      "www.terafileshare.com",
+
+      "terasharelink.com",
+      "www.terasharelink.com",
+
+      "terabox.app",
+      "dm.terabox.app",
+    ];
+
+    return supported.some(
+      (domain) =>
+        hostname === domain ||
+        hostname.endsWith(`.${domain}`),
+    );
   } catch {
     return false;
   }
 }
 
-export function extractSurl(input: string): string | null {
+// --------------------------------------------------
+// Extract SURL
+// --------------------------------------------------
+
+export function extractSurl(
+  input: string,
+): string | null {
   try {
-    const parsed = new URL(input.trim());
+    const value = input.trim();
+
+    // Direct ID
+    if (
+      /^[A-Za-z0-9_-]+$/.test(value) &&
+      !value.includes("/")
+    ) {
+      return value.startsWith("1")
+        ? value.slice(1)
+        : value;
+    }
+
+    const url = new URL(value);
 
     // ?surl=xxxx
-    const querySurl = parsed.searchParams.get("surl");
+    const querySurl =
+      url.searchParams.get("surl");
 
     if (querySurl) {
-      return querySurl.trim();
+      return querySurl.startsWith("1")
+        ? querySurl.slice(1)
+        : querySurl;
     }
 
     // /s/xxxx
-    const match = parsed.pathname.match(
-      /\/s\/([a-zA-Z0-9_-]+)/i,
-    );
+    const match =
+      url.pathname.match(
+        /\/s\/([A-Za-z0-9_-]+)/i,
+      );
 
     if (match?.[1]) {
-      return match[1];
+      const id = match[1];
+
+      return id.startsWith("1")
+        ? id.slice(1)
+        : id;
     }
 
     return null;
@@ -141,67 +159,37 @@ export function extractSurl(input: string): string | null {
   }
 }
 
-export function normalizeSurl(value: string): {
-  surlParam: string;
-  shortUrl: string;
-} {
-  let key = value.trim();
-
-  key = key.replace(/^\/+|\/+$/g, "");
-
-  /*
-   * TeraBox shares can appear with a leading "1".
-   * Keep both versions available because different
-   * endpoints expect different forms.
-   */
-
-  if (key.startsWith("1") && key.length > 1) {
-    return {
-      surlParam: key,
-      shortUrl: key.substring(1),
-    };
-  }
-
-  return {
-    surlParam: `1${key}`,
-    shortUrl: key,
-  };
-}
+// --------------------------------------------------
+// Format bytes
+// --------------------------------------------------
 
 export function formatBytes(
-  bytes: number | string,
-  decimals = 2,
+  value: number | string | null | undefined,
 ): string {
-  const value =
-    typeof bytes === "string"
-      ? Number(bytes)
-      : Number(bytes);
+  const bytes = Number(value);
 
-  if (!Number.isFinite(value) || value <= 0) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
     return "0 Bytes";
   }
 
-  const k = 1024;
-
-  const sizes = [
+  const units = [
     "Bytes",
     "KB",
     "MB",
     "GB",
     "TB",
     "PB",
-    "EB",
   ];
 
-  const i = Math.floor(
-    Math.log(value) / Math.log(k),
+  const index = Math.min(
+    Math.floor(
+      Math.log(bytes) / Math.log(1024),
+    ),
+    units.length - 1,
   );
 
-  const index = Math.min(i, sizes.length - 1);
+  const size =
+    bytes / Math.pow(1024, index);
 
-  return `${parseFloat(
-    (value / Math.pow(k, index)).toFixed(
-      decimals < 0 ? 0 : decimals,
-    ),
-  )} ${sizes[index]}`;
+  return `${size.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
 }
