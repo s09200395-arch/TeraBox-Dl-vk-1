@@ -1,24 +1,78 @@
 import { loadCookies } from "./utils";
 
+type CookieMap = Record<string, string>;
+
 const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/145.0.0.0 Safari/537.36";
 
-const APP_ID = "250528";
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-function buildCookieString(cookies: Record<string, string>) {
+// ------------------------------------------------------
+// COOKIE HELPERS
+// ------------------------------------------------------
+
+function getCookies(): CookieMap {
+  let cookies: CookieMap = {};
+
+  try {
+    const loaded = loadCookies();
+
+    if (loaded && typeof loaded === "object") {
+      cookies = {
+        ...loaded,
+      };
+    }
+  } catch (error) {
+    console.log("[TERABOX] Cookie loader warning:", error);
+  }
+
+  // Optional Railway environment cookie.
+  const envCookie =
+    process.env.TERABOX_COOKIE ||
+    process.env.TERABOX_COOKIES ||
+    process.env.COOKIE;
+
+  if (envCookie) {
+    for (const part of envCookie.split(";")) {
+      const index = part.indexOf("=");
+
+      if (index === -1) continue;
+
+      const name = part.slice(0, index).trim();
+      const value = part.slice(index + 1).trim();
+
+      if (name && value) {
+        cookies[name] = value;
+      }
+    }
+  }
+
+  return cookies;
+}
+
+function cookieHeader(cookies: CookieMap) {
   return Object.entries(cookies)
-    .filter(([_, value]) => value && value !== "undefined")
-    .map(([key, value]) => `${key}=${value}`)
+    .filter(([_, value]) => value !== undefined && value !== null)
+    .map(([name, value]) => `${name}=${value}`)
     .join("; ");
 }
+
+// ------------------------------------------------------
+// JS TOKEN
+// ------------------------------------------------------
 
 function extractJsToken(html: string): string | null {
   const patterns = [
     /fn%28%22(.*?)%22%29/,
     /fn\("([^"]+)"\)/,
-    /jsToken\s*=\s*["']([^"']+)["']/,
-    /jsToken["']?\s*:\s*["']([^"']+)["']/,
-    /window\.jsToken\s*=\s*["']([^"']+)["']/,
+    /jsToken\s*=\s*["']([^"']+)["']/i,
+    /jsToken["']?\s*:\s*["']([^"']+)["']/i,
+    /window\.jsToken\s*=\s*["']([^"']+)["']/i,
+    /"jsToken"\s*:\s*"([^"]+)"/i,
   ];
 
   for (const pattern of patterns) {
@@ -32,585 +86,361 @@ function extractJsToken(html: string): string | null {
   return null;
 }
 
-function extractDpLogId(text: string): string | null {
-  const patterns = [
-    /dp-logid[=\\"']+(\d+)/i,
-    /"dp-logid"\s*:\s*"?(\d+)"?/i,
-    /dpLogId["']?\s*[:=]\s*["']?(\d+)/i,
-  ];
+// ------------------------------------------------------
+// URL VARIANTS
+// ------------------------------------------------------
 
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
+function buildShortUrlVariants(surl: string) {
+  const clean = surl.trim();
 
-    if (match?.[1]) {
-      return match[1];
+  const withoutOne = clean.startsWith("1")
+    ? clean.slice(1)
+    : clean;
+
+  const withOne = withoutOne.startsWith("1")
+    ? withoutOne
+    : `1${withoutOne}`;
+
+  return Array.from(
+    new Set([
+      withoutOne,
+      withOne,
+      clean,
+    ]),
+  );
+}
+
+// ------------------------------------------------------
+// SHARE PAGE
+// ------------------------------------------------------
+
+async function getSharePage(
+  host: string,
+  surl: string,
+  cookies: CookieMap,
+) {
+  const variants = buildShortUrlVariants(surl);
+
+  for (const short of variants) {
+    const pageUrl =
+      `https://${host}/sharing/link?surl=` +
+      encodeURIComponent(short);
+
+    console.log("[TERABOX] Fetching page:", pageUrl);
+
+    try {
+      const response = await fetch(pageUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          Cookie: cookieHeader(cookies),
+          Referer: `https://${host}/`,
+        },
+        redirect: "follow",
+      });
+
+      console.log(
+        "[TERABOX] Page status:",
+        response.status,
+        host,
+        short,
+      );
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const text = await response.text();
+
+      const jsToken = extractJsToken(text);
+
+      if (jsToken) {
+        console.log("[TERABOX] jsToken extracted");
+        return {
+          jsToken,
+          shortUrl: short,
+        };
+      }
+    } catch (error) {
+      console.log(
+        "[TERABOX] Page request failed:",
+        error,
+      );
     }
   }
 
   return null;
 }
 
-function normalizeSurl(surl: string) {
-  let value = surl.trim();
+// ------------------------------------------------------
+// SHARE LIST
+// ------------------------------------------------------
 
-  if (value.startsWith("1")) {
-    return {
-      shorturl: value.substring(1),
-      original: value,
-    };
-  }
+async function requestShareList(
+  apiHost: string,
+  jsToken: string,
+  shortUrl: string,
+  cookies: CookieMap,
+) {
+  const apiUrl = new URL(
+    `https://${apiHost}/share/list`,
+  );
 
-  return {
-    shorturl: value,
-    original: `1${value}`,
-  };
-}
+  apiUrl.searchParams.set("app_id", "250528");
+  apiUrl.searchParams.set("jsToken", jsToken);
+  apiUrl.searchParams.set(
+    "site_referer",
+    "https://www.terabox.app/",
+  );
+  apiUrl.searchParams.set("shorturl", shortUrl);
+  apiUrl.searchParams.set("root", "1");
 
-async function safeJson(response: Response) {
+  console.log(
+    "[TERABOX] Share API:",
+    apiUrl.toString(),
+  );
+
+  const response = await fetch(apiUrl.toString(), {
+    method: "GET",
+
+    headers: {
+      Host: apiHost,
+      "User-Agent": USER_AGENT,
+      Accept:
+        "application/json, text/plain, */*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "X-Requested-With": "XMLHttpRequest",
+      Referer:
+        `https://${apiHost}/sharing/link?surl=${encodeURIComponent(shortUrl)}`,
+      Origin: `https://${apiHost}`,
+      Cookie: cookieHeader(cookies),
+    },
+  });
+
+  console.log(
+    "[TERABOX] Share API status:",
+    response.status,
+  );
+
   const text = await response.text();
+
+  if (!text) {
+    return null;
+  }
 
   try {
     return JSON.parse(text);
   } catch {
+    console.log(
+      "[TERABOX] Invalid JSON:",
+      text.slice(0, 300),
+    );
+
+    return null;
+  }
+}
+
+// ------------------------------------------------------
+// NORMALIZE RESPONSE
+// ------------------------------------------------------
+
+function normalizeResponse(data: any) {
+  if (!data) {
+    return null;
+  }
+
+  if (
+    Array.isArray(data.list) &&
+    data.list.length > 0
+  ) {
+    return data;
+  }
+
+  // Some responses wrap the list.
+  if (
+    data.data &&
+    Array.isArray(data.data.list) &&
+    data.data.list.length > 0
+  ) {
     return {
-      errno: -999,
-      errmsg: "Invalid JSON response",
-      raw: text.substring(0, 1000),
+      ...data,
+      list: data.data.list,
     };
   }
+
+  if (
+    data.data?.list &&
+    typeof data.data.list === "object"
+  ) {
+    const list = Object.values(
+      data.data.list,
+    );
+
+    if (list.length > 0) {
+      return {
+        ...data,
+        list,
+      };
+    }
+  }
+
+  return data;
 }
 
-async function resolveRedirect(
-  url: string,
-  cookieString: string,
-): Promise<string> {
-  if (!url) return "";
+// ------------------------------------------------------
+// MAIN
+// ------------------------------------------------------
 
-  try {
-    const response = await fetch(url, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "*/*",
-        ...(cookieString ? { Cookie: cookieString } : {}),
-      },
-    });
+export async function tera(
+  surl: string,
+): Promise<any> {
+  console.log(
+    "[TERABOX] Starting extraction:",
+    surl,
+  );
 
-    const location = response.headers.get("location");
+  const cookies = getCookies();
 
-    if (location) {
-      return location;
-    }
+  console.log(
+    "[TERABOX] Cookies loaded:",
+    Object.keys(cookies),
+  );
 
-    if (response.status >= 200 && response.status < 300) {
-      return url;
-    }
+  /*
+   * Try current domains one by one.
+   *
+   * dm.terabox.app is preferred.
+   * 1024tera.com and terabox.com are fallbacks.
+   */
 
-    return url;
-  } catch {
-    return url;
-  }
-}
-
-async function getDownloadLink(
-  file: any,
-  shareData: any,
-  jsToken: string,
-  dpLogId: string,
-  cookieString: string,
-) {
-  const fid =
-    file?.fs_id ??
-    file?.fid ??
-    file?.fsid ??
-    file?.id;
-
-  const shareid =
-    shareData?.shareid ??
-    shareData?.share_id ??
-    shareData?.shareId;
-
-  const uk = shareData?.uk;
-
-  const sign = shareData?.sign;
-
-  const timestamp =
-    shareData?.timestamp ??
-    Math.floor(Date.now() / 1000).toString();
-
-  if (!fid) {
-    throw new Error("Missing file fs_id");
-  }
-
-  if (!shareid) {
-    throw new Error("Missing shareid");
-  }
-
-  if (!uk) {
-    throw new Error("Missing uk");
-  }
-
-  if (!sign) {
-    throw new Error("Missing sign");
-  }
-
-  console.log("[TERABOX] Download parameters:", {
-    fid,
-    shareid,
-    uk,
-    timestamp,
-    hasSign: Boolean(sign),
-    hasJsToken: Boolean(jsToken),
-  });
-
-  const params = new URLSearchParams({
-    app_id: APP_ID,
-    web: "1",
-    channel: "dubox",
-    clienttype: "0",
-    jsToken,
-    "dp-logid": dpLogId,
-    shareid: String(shareid),
-    sign: String(sign),
-    timestamp: String(timestamp),
-  });
-
-  const body = new URLSearchParams({
-    product: "share",
-    nozip: "0",
-    fid_list: JSON.stringify([String(fid)]),
-    uk: String(uk),
-    primaryid: String(shareid),
-  });
-
-  const endpoints = [
-    `https://www.terabox.com/share/download?${params.toString()}`,
-    `https://dm.terabox.app/share/download?${params.toString()}`,
+  const hosts = [
+    {
+      page: "dm.terabox.app",
+      api: "dm.terabox.app",
+    },
+    {
+      page: "www.1024tera.com",
+      api: "www.1024tera.com",
+    },
+    {
+      page: "www.terabox.com",
+      api: "www.terabox.com",
+    },
   ];
 
-  let lastError = "";
+  let lastError =
+    "TeraBox returned an empty file list";
 
-  for (const endpoint of endpoints) {
+  for (const host of hosts) {
+    console.log(
+      `[TERABOX] Trying ${host.page}`,
+    );
+
     try {
-      console.log("[TERABOX] Trying download endpoint:", endpoint);
-
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept: "application/json, text/plain, */*",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Content-Type":
-            "application/x-www-form-urlencoded; charset=UTF-8",
-          "X-Requested-With": "XMLHttpRequest",
-          Origin: "https://www.terabox.com",
-          Referer: "https://www.terabox.com/",
-          ...(cookieString ? { Cookie: cookieString } : {}),
-        },
-        body: body.toString(),
-      });
-
-      console.log(
-        "[TERABOX] Download API status:",
-        response.status,
+      const page = await getSharePage(
+        host.page,
+        surl,
+        cookies,
       );
 
-      const data = await safeJson(response);
+      if (!page) {
+        console.log(
+          `[TERABOX] No jsToken from ${host.page}`,
+        );
 
-      console.log(
-        "[TERABOX] Download API response:",
-        JSON.stringify(data).substring(0, 1000),
-      );
-
-      if (data?.errno && Number(data.errno) !== 0) {
-        lastError = `Download API errno ${data.errno}`;
         continue;
       }
 
-      let dlink =
-        data?.dlink ??
-        data?.download ??
-        data?.download_url ??
-        data?.url;
-
-      if (!dlink && Array.isArray(data?.list)) {
-        dlink =
-          data.list[0]?.dlink ??
-          data.list[0]?.download ??
-          data.list[0]?.url;
-      }
-
-      if (!dlink && Array.isArray(data?.data)) {
-        dlink =
-          data.data[0]?.dlink ??
-          data.data[0]?.download ??
-          data.data[0]?.url;
-      }
-
-      if (typeof dlink === "string" && dlink.length > 0) {
-        console.log("[TERABOX] dlink received");
-
-        const finalUrl = await resolveRedirect(
-          dlink,
-          cookieString,
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        console.log(
+          `[TERABOX] Share request attempt ${attempt}/3`,
         );
 
-        return finalUrl || dlink;
-      }
-
-      lastError = "Download API returned no dlink";
-    } catch (error: any) {
-      console.error(
-        "[TERABOX] Download endpoint failed:",
-        error,
-      );
-
-      lastError = String(error);
-    }
-  }
-
-  throw new Error(
-    lastError || "TeraBox returned no download link",
-  );
-}
-
-export async function tera(surl: string): Promise<any> {
-  try {
-    console.log("[TERABOX] Starting extraction");
-    console.log("[TERABOX] Input surl:", surl);
-
-    const cookies = loadCookies() || {};
-    const cookieString = buildCookieString(cookies);
-
-    console.log(
-      "[TERABOX] Cookies loaded:",
-      Object.keys(cookies),
-    );
-
-    const normalized = normalizeSurl(surl);
-
-    const shorturl = normalized.shorturl;
-
-    console.log("[TERABOX] shorturl:", shorturl);
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 1: Fetch sharing page
-     * ---------------------------------------------------------
-     */
-
-    const pageUrl =
-      `https://dm.terabox.app/sharing/link?surl=${encodeURIComponent(
-        shorturl,
-      )}`;
-
-    console.log("[TERABOX] Fetching page:", pageUrl);
-
-    const pageResponse = await fetch(pageUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        ...(cookieString ? { Cookie: cookieString } : {}),
-      },
-    });
-
-    console.log(
-      "[TERABOX] Page status:",
-      pageResponse.status,
-    );
-
-    if (!pageResponse.ok) {
-      return {
-        error: `TeraBox sharing page HTTP ${pageResponse.status}`,
-      };
-    }
-
-    const html = await pageResponse.text();
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 2: Extract jsToken
-     * ---------------------------------------------------------
-     */
-
-    const jsToken = extractJsToken(html);
-
-    if (!jsToken) {
-      console.error(
-        "[TERABOX] jsToken not found",
-      );
-
-      return {
-        error:
-          "Failed to extract jsToken from TeraBox page",
-      };
-    }
-
-    console.log("[TERABOX] jsToken extracted");
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 3: Extract dp-logid
-     * ---------------------------------------------------------
-     */
-
-    const extractedDpLogId =
-      extractDpLogId(html);
-
-    const dpLogId =
-      extractedDpLogId ||
-      Date.now().toString();
-
-    console.log(
-      "[TERABOX] dp-logid:",
-      dpLogId,
-    );
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 4: Share list
-     * ---------------------------------------------------------
-     */
-
-    const listUrl = new URL(
-      "https://dm.terabox.app/share/list",
-    );
-
-    listUrl.searchParams.set(
-      "app_id",
-      APP_ID,
-    );
-
-    listUrl.searchParams.set(
-      "web",
-      "1",
-    );
-
-    listUrl.searchParams.set(
-      "channel",
-      "0",
-    );
-
-    listUrl.searchParams.set(
-      "clienttype",
-      "0",
-    );
-
-    listUrl.searchParams.set(
-      "jsToken",
-      jsToken,
-    );
-
-    listUrl.searchParams.set(
-      "dp-logid",
-      dpLogId,
-    );
-
-    listUrl.searchParams.set(
-      "page",
-      "1",
-    );
-
-    listUrl.searchParams.set(
-      "num",
-      "20",
-    );
-
-    listUrl.searchParams.set(
-      "by",
-      "name",
-    );
-
-    listUrl.searchParams.set(
-      "order",
-      "asc",
-    );
-
-    listUrl.searchParams.set(
-      "site_referer",
-      "https://www.terabox.com/",
-    );
-
-    listUrl.searchParams.set(
-      "shorturl",
-      shorturl,
-    );
-
-    listUrl.searchParams.set(
-      "root",
-      "1",
-    );
-
-    console.log(
-      "[TERABOX] Fetching share list",
-    );
-
-    const listResponse = await fetch(
-      listUrl.toString(),
-      {
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept:
-            "application/json, text/plain, */*",
-          "Accept-Language":
-            "en-US,en;q=0.9",
-          "X-Requested-With":
-            "XMLHttpRequest",
-          Referer: pageUrl,
-          Origin:
-            "https://dm.terabox.app",
-          ...(cookieString
-            ? { Cookie: cookieString }
-            : {}),
-        },
-      },
-    );
-
-    console.log(
-      "[TERABOX] Share API status:",
-      listResponse.status,
-    );
-
-    const data = await safeJson(
-      listResponse,
-    );
-
-    console.log(
-      "[TERABOX] Share API errno:",
-      data?.errno,
-    );
-
-    if (
-      data?.errno !== undefined &&
-      Number(data.errno) !== 0
-    ) {
-      return {
-        error:
-          data?.errmsg ||
-          data?.message ||
-          `TeraBox API errno ${data.errno}`,
-      };
-    }
-
-    if (
-      !Array.isArray(data?.list) ||
-      data.list.length === 0
-    ) {
-      return {
-        error:
-          "TeraBox returned an empty file list",
-      };
-    }
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 5: File information
-     * ---------------------------------------------------------
-     */
-
-    const files = data.list;
-
-    console.log(
-      "[TERABOX] Files found:",
-      files.length,
-    );
-
-    const resultFiles = [];
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 6: Resolve download links
-     * ---------------------------------------------------------
-     */
-
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-
-      console.log(
-        `[TERABOX] Resolving file ${i + 1}/${files.length}:`,
-        file?.server_filename,
-      );
-
-      let dlink =
-        file?.dlink ??
-        file?.download_url ??
-        file?.download;
-
-      if (!dlink) {
         try {
-          dlink = await getDownloadLink(
-            file,
-            data,
-            jsToken,
-            dpLogId,
-            cookieString,
+          const result =
+            await requestShareList(
+              host.api,
+              page.jsToken,
+              page.shortUrl,
+              cookies,
+            );
+
+          const normalized =
+            normalizeResponse(result);
+
+          if (
+            normalized &&
+            Array.isArray(normalized.list) &&
+            normalized.list.length > 0
+          ) {
+            console.log(
+              `[TERABOX] SUCCESS via ${host.api}`,
+            );
+
+            return normalized;
+          }
+
+          if (normalized?.errno !== undefined) {
+            lastError =
+              `TeraBox errno: ${normalized.errno}`;
+
+            console.log(
+              "[TERABOX] errno:",
+              normalized.errno,
+            );
+          }
+
+          if (normalized?.errmsg) {
+            lastError = normalized.errmsg;
+          }
+
+          if (
+            normalized?.message
+          ) {
+            lastError =
+              normalized.message;
+          }
+
+          console.log(
+            "[TERABOX] Empty file list",
           );
         } catch (error: any) {
-          console.error(
-            "[TERABOX] Download link failed:",
-            error,
-          );
+          lastError =
+            error?.message ||
+            String(error);
 
-          /*
-           * Don't crash the complete response.
-           * Keep the file metadata and mark dlink as null.
-           */
-          dlink = null;
+          console.log(
+            "[TERABOX] API attempt error:",
+            lastError,
+          );
+        }
+
+        if (attempt < 3) {
+          await sleep(700);
         }
       }
-
-      resultFiles.push({
-        ...file,
-        dlink,
-      });
-    }
-
-    /*
-     * ---------------------------------------------------------
-     * STEP 7: Final response
-     * ---------------------------------------------------------
-     */
-
-    const firstFile = resultFiles[0];
-
-    if (!firstFile?.dlink) {
-      console.error(
-        "[TERABOX] No download link returned",
-      );
-
-      return {
-        error:
-          "TeraBox returned file information but no download link",
-        list: resultFiles,
-        shareid: data?.shareid,
-        uk: data?.uk,
-        sign: data?.sign,
-        timestamp: data?.timestamp,
-      };
-    }
-
-    console.log(
-      "[TERABOX] Download link successfully resolved",
-    );
-
-    return {
-      ...data,
-      list: resultFiles,
-      success: true,
-    };
-  } catch (error: any) {
-    console.error(
-      "[TERABOX] Fatal error:",
-      error,
-    );
-
-    return {
-      error:
+    } catch (error: any) {
+      lastError =
         error?.message ||
-        String(error),
-    };
+        String(error);
+
+      console.log(
+        `[TERABOX] Host failed ${host.page}:`,
+        lastError,
+      );
+    }
   }
+
+  console.log(
+    "[TERABOX] FINAL ERROR:",
+    lastError,
+  );
+
+  return {
+    error: lastError,
+    list: [],
+  };
 }
