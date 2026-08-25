@@ -15,21 +15,18 @@ const cache = new Map<
   }
 >();
 
-const CACHE_DURATION = 2 * 60 * 60 * 1000;
+const CACHE_DURATION = 30 * 60 * 1000;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
 function json(data: any, status = 200) {
   return Response.json(data, {
     status,
-    headers: {
-      ...corsHeaders,
-      "Content-Type": "application/json; charset=utf-8",
-    },
+    headers: corsHeaders,
   });
 }
 
@@ -40,7 +37,6 @@ Bun.serve({
     const requestUrl = new URL(req.url);
     const pathname = requestUrl.pathname;
 
-    // CORS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -48,58 +44,61 @@ Bun.serve({
       });
     }
 
-    // =========================
-    // HOME / HEALTH CHECK
-    // =========================
+    // --------------------------------------------------
+    // HOME
+    // --------------------------------------------------
 
-    if (pathname === "/" || pathname === "/health") {
+    if (pathname === "/") {
       return json({
         status: "ok",
         service: "TeraBox Downloader API",
-        version: "4.0",
+        version: "5.0",
+        server: "online",
+        endpoints: {
+          health: "/health",
+          api: "/api?url=TERABOX_URL",
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // --------------------------------------------------
+    // HEALTH
+    // --------------------------------------------------
+
+    if (pathname === "/health") {
+      return json({
+        status: "ok",
         server: "online",
         timestamp: new Date().toISOString(),
       });
     }
 
-    // =========================
+    // --------------------------------------------------
     // API
-    // =========================
+    // --------------------------------------------------
 
     if (pathname === "/api") {
-      const startTime = Date.now();
+      const started = Date.now();
 
       try {
-        const targetUrlRaw =
-          requestUrl.searchParams.get("url");
+        const rawUrl = requestUrl.searchParams.get("url");
 
-        // Missing URL
-        if (!targetUrlRaw || !targetUrlRaw.trim()) {
+        if (!rawUrl || !rawUrl.trim()) {
           return json(
             {
               status: "error",
               message: "Missing required parameter: url",
               example:
-                "/api?url=https://terabox.app/s/1HSEb8PZRUE7Z1Tvd3ZtT0g",
+                "/api?url=https://terasharefile.com/s/XXXXXXXX",
             },
             400,
           );
         }
 
-        const targetUrl = targetUrlRaw.trim();
+        const targetUrl = rawUrl.trim();
 
-        console.log(
-          "[API] Incoming URL:",
-          targetUrl,
-        );
-
-        // Validate URL
         if (!isValidShareUrl(targetUrl)) {
-          console.log(
-            "[API] Invalid share URL:",
-            targetUrl,
-          );
-
           return json(
             {
               status: "error",
@@ -110,7 +109,6 @@ Bun.serve({
           );
         }
 
-        // Extract surl
         const surl = extractSurl(targetUrl);
 
         if (!surl) {
@@ -118,235 +116,175 @@ Bun.serve({
             {
               status: "error",
               url: targetUrl,
-              message:
-                "Could not extract share ID from URL",
+              message: "Could not extract TeraBox share ID",
             },
             400,
           );
         }
 
+        console.log("[API] Incoming URL:", targetUrl);
         console.log("[API] Extracted surl:", surl);
 
-        // =========================
+        // ------------------------------------------------
         // CACHE
-        // =========================
+        // ------------------------------------------------
 
         let data: any;
 
         const cached = cache.get(surl);
 
-        if (
-          cached &&
-          Date.now() < cached.expiry
-        ) {
-          console.log(
-            "[CACHE] Using cached result:",
-            surl,
-          );
-
+        if (cached && Date.now() < cached.expiry) {
+          console.log("[CACHE] Using cached result:", surl);
           data = cached.data;
         } else {
-          console.log(
-            "[TERABOX] Fetching fresh result...",
-          );
+          console.log("[CACHE] Fetching fresh result:", surl);
 
           data = await tera(surl);
 
-          cache.set(surl, {
-            data,
-            expiry:
-              Date.now() + CACHE_DURATION,
-          });
+          // Only cache successful useful results.
+          if (
+            data &&
+            Array.isArray(data.list) &&
+            data.list.length > 0
+          ) {
+            cache.set(surl, {
+              data,
+              expiry: Date.now() + CACHE_DURATION,
+            });
+          }
         }
 
         const responseTime =
-          ((Date.now() - startTime) / 1000).toFixed(
-            3,
-          ) + "s";
+          ((Date.now() - started) / 1000).toFixed(3) + "s";
 
-        // Extraction error
-        if (!data || data.error) {
-          console.error(
-            "[TERABOX] Extraction error:",
-            data?.error,
-          );
+        // ------------------------------------------------
+        // EXTRACTION ERROR
+        // ------------------------------------------------
 
+        if (!data) {
           return json(
             {
               status: "error",
               url: targetUrl,
               surl,
-              error:
-                data?.error ||
-                "TeraBox extraction failed",
+              message: "TeraBox returned no response",
               response_time: responseTime,
-              timestamp:
-                new Date().toISOString(),
+            },
+            502,
+          );
+        }
+
+        if (data.error) {
+          return json(
+            {
+              status: "error",
+              url: targetUrl,
+              surl,
+              error: data.error,
+              response_time: responseTime,
+              timestamp: new Date().toISOString(),
             },
             400,
           );
         }
 
-        // =========================
-        // FILE DATA
-        // =========================
+        // ------------------------------------------------
+        // FILE LIST
+        // ------------------------------------------------
 
-        const list = Array.isArray(data.list)
+        const files = Array.isArray(data.list)
           ? data.list
           : [];
 
-        if (list.length === 0) {
+        if (files.length === 0) {
           return json(
             {
               status: "error",
               url: targetUrl,
               surl,
-              message:
-                "No files found in this TeraBox share",
+              message: "TeraBox returned an empty file list",
               response_time: responseTime,
-              timestamp:
-                new Date().toISOString(),
+              timestamp: new Date().toISOString(),
             },
             404,
           );
         }
 
-        const firstItem = list[0];
+        // ------------------------------------------------
+        // NORMALIZE ALL FILES
+        // ------------------------------------------------
 
-        const filename =
-          firstItem.server_filename ||
-          firstItem.filename ||
-          "TeraBox File";
+        const normalizedFiles = files.map((file: any) => ({
+          filename:
+            file.server_filename ||
+            file.filename ||
+            file.name ||
+            "Unknown file",
 
-        const rawSize =
-          firstItem.size ?? 0;
+          size:
+            file.size !== undefined
+              ? formatBytes(file.size)
+              : undefined,
 
-        const size = formatBytes(rawSize);
+          fs_id: file.fs_id,
 
-        const download =
-          firstItem.dlink ||
-          firstItem.download ||
-          null;
+          download:
+            file.dlink ||
+            file.download_url ||
+            file.download ||
+            null,
 
-        const thumbs =
-          firstItem.thumbs || null;
+          thumbs: file.thumbs || null,
 
-        // No direct link
-        if (!download) {
-          console.error(
-            "[TERABOX] No download link returned",
-          );
+          isdir:
+            file.isdir !== undefined
+              ? Boolean(file.isdir)
+              : false,
+        }));
 
-          return json(
-            {
-              status: "error",
-              url: targetUrl,
-              surl,
-              filename,
-              size,
-              message:
-                "TeraBox returned no download link",
-              response_time: responseTime,
-              timestamp:
-                new Date().toISOString(),
-            },
-            400,
-          );
-        }
-
-        // =========================
-        // SUCCESS
-        // =========================
-
-        console.log(
-          "[SUCCESS]",
-          filename,
-          size,
-        );
+        const first = normalizedFiles[0];
 
         return json({
           status: "success",
-
           url: targetUrl,
-
           surl,
-
-          filename,
-
-          size,
-
-          download,
-
-          ...(thumbs
-            ? { thumbs }
-            : {}),
-
-          // Return complete original list too
-          // for future Telegram bot features
-          files: list,
-
-          response_time:
-            responseTime,
-
-          timestamp:
-            new Date().toISOString(),
+          filename: first.filename,
+          size: first.size,
+          download: first.download,
+          thumbs: first.thumbs,
+          files: normalizedFiles,
+          count: normalizedFiles.length,
+          response_time: responseTime,
+          timestamp: new Date().toISOString(),
         });
       } catch (error: any) {
-        console.error(
-          "[API ERROR]",
-          error,
-        );
-
-        const responseTime =
-          ((Date.now() - startTime) / 1000).toFixed(
-            3,
-          ) + "s";
+        console.error("[API ERROR]", error);
 
         return json(
           {
             status: "error",
-
             message:
               error?.message ||
-              String(error),
-
-            url:
-              requestUrl.searchParams.get(
-                "url",
-              ),
-
+              String(error) ||
+              "Unknown server error",
+            url: requestUrl.searchParams.get("url"),
             response_time:
-              responseTime,
-
-            timestamp:
-              new Date().toISOString(),
+              ((Date.now() - started) / 1000).toFixed(3) + "s",
           },
           500,
         );
       }
     }
 
-    // =========================
-    // 404
-    // =========================
-
     return json(
       {
         status: "error",
-        message: "Endpoint not found",
-        available_endpoints: {
-          health: "/",
-          api: "/api?url=TERABOX_SHARE_URL",
-        },
+        message: "Not Found",
       },
       404,
     );
   },
 });
-
-console.log(
-  `[SERVER] Starting on 0.0.0.0:${port}`,
-);
 
 console.log(
   `[SERVER] TeraBox API running on http://0.0.0.0:${port}`,
