@@ -7,6 +7,8 @@ const USER_AGENT =
   "AppleWebKit/537.36 (KHTML, like Gecko) " +
   "Chrome/145.0.0.0 Safari/537.36";
 
+const APP_ID = "250528";
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -22,15 +24,12 @@ function getCookies(): CookieMap {
     const loaded = loadCookies();
 
     if (loaded && typeof loaded === "object") {
-      cookies = {
-        ...loaded,
-      };
+      cookies = { ...loaded };
     }
   } catch (error) {
     console.log("[TERABOX] Cookie loader warning:", error);
   }
 
-  // Optional Railway environment cookie.
   const envCookie =
     process.env.TERABOX_COOKIE ||
     process.env.TERABOX_COOKIES ||
@@ -56,16 +55,77 @@ function getCookies(): CookieMap {
 
 function cookieHeader(cookies: CookieMap) {
   return Object.entries(cookies)
-    .filter(([_, value]) => value !== undefined && value !== null)
+    .filter(
+      ([_, value]) =>
+        value !== undefined &&
+        value !== null &&
+        value !== "",
+    )
     .map(([name, value]) => `${name}=${value}`)
     .join("; ");
+}
+
+// ------------------------------------------------------
+// URL PARSER
+// ------------------------------------------------------
+
+function extractSurl(input: string): string {
+  const value = input.trim();
+
+  try {
+    const url = new URL(value);
+
+    const querySurl =
+      url.searchParams.get("surl");
+
+    if (querySurl) {
+      return querySurl;
+    }
+
+    const match = url.pathname.match(
+      /\/s\/([^/?#]+)/i,
+    );
+
+    if (match?.[1]) {
+      return match[1];
+    }
+  } catch {
+    // Not a full URL.
+  }
+
+  return value
+    .replace(/^https?:\/\/[^/]+\/s\//i, "")
+    .replace(/^\/s\//i, "")
+    .trim();
+}
+
+function buildShortUrlVariants(input: string) {
+  const clean = extractSurl(input);
+
+  const withoutOne = clean.startsWith("1")
+    ? clean.slice(1)
+    : clean;
+
+  const withOne = withoutOne.startsWith("1")
+    ? withoutOne
+    : `1${withoutOne}`;
+
+  return Array.from(
+    new Set([
+      withoutOne,
+      withOne,
+      clean,
+    ]),
+  );
 }
 
 // ------------------------------------------------------
 // JS TOKEN
 // ------------------------------------------------------
 
-function extractJsToken(html: string): string | null {
+function extractJsToken(
+  html: string,
+): string | null {
   const patterns = [
     /fn%28%22(.*?)%22%29/,
     /fn\("([^"]+)"\)/,
@@ -87,81 +147,69 @@ function extractJsToken(html: string): string | null {
 }
 
 // ------------------------------------------------------
-// URL VARIANTS
-// ------------------------------------------------------
-
-function buildShortUrlVariants(surl: string) {
-  const clean = surl.trim();
-
-  const withoutOne = clean.startsWith("1")
-    ? clean.slice(1)
-    : clean;
-
-  const withOne = withoutOne.startsWith("1")
-    ? withoutOne
-    : `1${withoutOne}`;
-
-  return Array.from(
-    new Set([
-      withoutOne,
-      withOne,
-      clean,
-    ]),
-  );
-}
-
-// ------------------------------------------------------
 // SHARE PAGE
 // ------------------------------------------------------
 
 async function getSharePage(
   host: string,
-  surl: string,
+  input: string,
   cookies: CookieMap,
 ) {
-  const variants = buildShortUrlVariants(surl);
+  const variants =
+    buildShortUrlVariants(input);
 
-  for (const short of variants) {
+  for (const shortUrl of variants) {
     const pageUrl =
       `https://${host}/sharing/link?surl=` +
-      encodeURIComponent(short);
+      encodeURIComponent(shortUrl);
 
-    console.log("[TERABOX] Fetching page:", pageUrl);
+    console.log(
+      "[TERABOX] Fetching page:",
+      pageUrl,
+    );
 
     try {
-      const response = await fetch(pageUrl, {
-        method: "GET",
-        headers: {
-          "User-Agent": USER_AGENT,
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          Cookie: cookieHeader(cookies),
-          Referer: `https://${host}/`,
+      const response = await fetch(
+        pageUrl,
+        {
+          method: "GET",
+          headers: {
+            "User-Agent": USER_AGENT,
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language":
+              "en-US,en;q=0.9",
+            Cookie: cookieHeader(cookies),
+            Referer:
+              `https://${host}/`,
+          },
+          redirect: "follow",
         },
-        redirect: "follow",
-      });
+      );
 
       console.log(
         "[TERABOX] Page status:",
         response.status,
-        host,
-        short,
       );
 
       if (!response.ok) {
         continue;
       }
 
-      const text = await response.text();
+      const text =
+        await response.text();
 
-      const jsToken = extractJsToken(text);
+      const jsToken =
+        extractJsToken(text);
 
       if (jsToken) {
-        console.log("[TERABOX] jsToken extracted");
+        console.log(
+          "[TERABOX] jsToken extracted",
+        );
+
         return {
           jsToken,
-          shortUrl: short,
+          shortUrl,
         };
       }
     } catch (error) {
@@ -180,52 +228,78 @@ async function getSharePage(
 // ------------------------------------------------------
 
 async function requestShareList(
-  apiHost: string,
+  host: string,
   jsToken: string,
   shortUrl: string,
   cookies: CookieMap,
 ) {
-  const apiUrl = new URL(
-    `https://${apiHost}/share/list`,
+  const apiUrl =
+    new URL(
+      `https://${host}/share/list`,
+    );
+
+  apiUrl.searchParams.set(
+    "app_id",
+    APP_ID,
   );
 
-  apiUrl.searchParams.set("app_id", "250528");
-  apiUrl.searchParams.set("jsToken", jsToken);
+  apiUrl.searchParams.set(
+    "jsToken",
+    jsToken,
+  );
+
   apiUrl.searchParams.set(
     "site_referer",
     "https://www.terabox.app/",
   );
-  apiUrl.searchParams.set("shorturl", shortUrl);
-  apiUrl.searchParams.set("root", "1");
+
+  apiUrl.searchParams.set(
+    "shorturl",
+    shortUrl,
+  );
+
+  apiUrl.searchParams.set(
+    "root",
+    "1",
+  );
 
   console.log(
     "[TERABOX] Share API:",
     apiUrl.toString(),
   );
 
-  const response = await fetch(apiUrl.toString(), {
-    method: "GET",
-
-    headers: {
-      Host: apiHost,
-      "User-Agent": USER_AGENT,
-      Accept:
-        "application/json, text/plain, */*",
-      "Accept-Language": "en-US,en;q=0.9",
-      "X-Requested-With": "XMLHttpRequest",
-      Referer:
-        `https://${apiHost}/sharing/link?surl=${encodeURIComponent(shortUrl)}`,
-      Origin: `https://${apiHost}`,
-      Cookie: cookieHeader(cookies),
-    },
-  });
+  const response =
+    await fetch(
+      apiUrl.toString(),
+      {
+        method: "GET",
+        headers: {
+          Host: host,
+          "User-Agent":
+            USER_AGENT,
+          Accept:
+            "application/json, text/plain, */*",
+          "Accept-Language":
+            "en-US,en;q=0.9",
+          "X-Requested-With":
+            "XMLHttpRequest",
+          Referer:
+            `https://${host}/sharing/link?surl=${encodeURIComponent(shortUrl)}&clearCache=1`,
+          Origin:
+            `https://${host}`,
+          Cookie:
+            cookieHeader(cookies),
+        },
+      },
+    );
 
   console.log(
     "[TERABOX] Share API status:",
     response.status,
   );
 
-  const text = await response.text();
+  const text =
+    await response.text();
 
   if (!text) {
     return null;
@@ -236,7 +310,7 @@ async function requestShareList(
   } catch {
     console.log(
       "[TERABOX] Invalid JSON:",
-      text.slice(0, 300),
+      text.slice(0, 500),
     );
 
     return null;
@@ -244,47 +318,292 @@ async function requestShareList(
 }
 
 // ------------------------------------------------------
-// NORMALIZE RESPONSE
+// DOWNLOAD LINK
 // ------------------------------------------------------
 
-function normalizeResponse(data: any) {
+async function requestDownloadLink(
+  host: string,
+  jsToken: string,
+  file: any,
+  shareData: any,
+  cookies: CookieMap,
+) {
+  const fid =
+    file?.fs_id ??
+    file?.fid ??
+    file?.fsid;
+
+  if (
+    fid === undefined ||
+    fid === null
+  ) {
+    return null;
+  }
+
+  const shareId =
+    shareData?.shareid ??
+    shareData?.share_id ??
+    shareData?.shareId ??
+    file?.shareid ??
+    file?.share_id;
+
+  const uk =
+    shareData?.uk ??
+    shareData?.share_uk ??
+    file?.uk;
+
+  const sign =
+    shareData?.sign ??
+    file?.sign;
+
+  const timestamp =
+    shareData?.timestamp ??
+    file?.timestamp ??
+    Math.floor(
+      Date.now() / 1000,
+    );
+
+  if (
+    shareId === undefined ||
+    uk === undefined
+  ) {
+    console.log(
+      "[TERABOX] Download metadata missing:",
+      {
+        fid,
+        shareId,
+        uk,
+        sign,
+        timestamp,
+      },
+    );
+
+    return null;
+  }
+
+  const downloadUrl =
+    new URL(
+      `https://${host}/share/download`,
+    );
+
+  downloadUrl.searchParams.set(
+    "app_id",
+    APP_ID,
+  );
+
+  downloadUrl.searchParams.set(
+    "web",
+    "1",
+  );
+
+  downloadUrl.searchParams.set(
+    "channel",
+    "dubox",
+  );
+
+  downloadUrl.searchParams.set(
+    "clienttype",
+    "0",
+  );
+
+  downloadUrl.searchParams.set(
+    "jsToken",
+    jsToken,
+  );
+
+  downloadUrl.searchParams.set(
+    "shareid",
+    String(shareId),
+  );
+
+  if (sign) {
+    downloadUrl.searchParams.set(
+      "sign",
+      String(sign),
+    );
+  }
+
+  downloadUrl.searchParams.set(
+    "timestamp",
+    String(timestamp),
+  );
+
+  console.log(
+    "[TERABOX] Requesting download link:",
+    downloadUrl.toString(),
+  );
+
+  const body =
+    new URLSearchParams();
+
+  body.set(
+    "product",
+    "share",
+  );
+
+  body.set(
+    "nozip",
+    "0",
+  );
+
+  body.set(
+    "fid_list",
+    JSON.stringify([
+      Number(fid),
+    ]),
+  );
+
+  body.set(
+    "uk",
+    String(uk),
+  );
+
+  body.set(
+    "primaryid",
+    String(shareId),
+  );
+
+  try {
+    const response =
+      await fetch(
+        downloadUrl.toString(),
+        {
+          method: "POST",
+          headers: {
+            Host: host,
+            "User-Agent":
+              USER_AGENT,
+            Accept:
+              "application/json, text/plain, */*",
+            "Accept-Language":
+              "en-US,en;q=0.9",
+            "Content-Type":
+              "application/x-www-form-urlencoded",
+            "X-Requested-With":
+              "XMLHttpRequest",
+            Referer:
+              `https://${host}/sharing/link?surl=${encodeURIComponent(
+                shareData?.shorturl ||
+                  shareData?.shortUrl ||
+                  "",
+              )}`,
+            Origin:
+              `https://${host}`,
+            Cookie:
+              cookieHeader(cookies),
+          },
+          body:
+            body.toString(),
+        },
+      );
+
+    console.log(
+      "[TERABOX] Download API status:",
+      response.status,
+    );
+
+    const text =
+      await response.text();
+
+    if (!text) {
+      return null;
+    }
+
+    let data: any;
+
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.log(
+        "[TERABOX] Download API invalid JSON:",
+        text.slice(0, 500),
+      );
+
+      return null;
+    }
+
+    console.log(
+      "[TERABOX] Download API errno:",
+      data?.errno,
+    );
+
+    if (
+      data?.errno !== undefined &&
+      Number(data.errno) !== 0
+    ) {
+      console.log(
+        "[TERABOX] Download API error:",
+        data,
+      );
+
+      return null;
+    }
+
+    const dlink =
+      data?.dlink ||
+      data?.data?.dlink ||
+      data?.list?.[0]?.dlink ||
+      data?.data?.list?.[0]?.dlink;
+
+    if (dlink) {
+      return dlink;
+    }
+
+    return null;
+  } catch (error) {
+    console.log(
+      "[TERABOX] Download request failed:",
+      error,
+    );
+
+    return null;
+  }
+}
+
+// ------------------------------------------------------
+// NORMALIZE
+// ------------------------------------------------------
+
+function normalizeResponse(
+  data: any,
+) {
   if (!data) {
     return null;
   }
 
   if (
-    Array.isArray(data.list) &&
-    data.list.length > 0
+    Array.isArray(data.list)
   ) {
     return data;
   }
 
-  // Some responses wrap the list.
   if (
     data.data &&
-    Array.isArray(data.data.list) &&
-    data.data.list.length > 0
+    Array.isArray(
+      data.data.list,
+    )
   ) {
     return {
       ...data,
-      list: data.data.list,
+      list:
+        data.data.list,
     };
   }
 
   if (
     data.data?.list &&
-    typeof data.data.list === "object"
+    typeof data.data.list ===
+      "object"
   ) {
-    const list = Object.values(
-      data.data.list,
-    );
+    const list =
+      Object.values(
+        data.data.list,
+      );
 
-    if (list.length > 0) {
-      return {
-        ...data,
-        list,
-      };
-    }
+    return {
+      ...data,
+      list,
+    };
   }
 
   return data;
@@ -295,26 +614,35 @@ function normalizeResponse(data: any) {
 // ------------------------------------------------------
 
 export async function tera(
-  surl: string,
+  input: string,
 ): Promise<any> {
   console.log(
-    "[TERABOX] Starting extraction:",
-    surl,
+    "[TERABOX] =================================",
   );
 
-  const cookies = getCookies();
+  console.log(
+    "[TERABOX] Starting extraction:",
+    input,
+  );
+
+  if (
+    !input ||
+    typeof input !== "string"
+  ) {
+    return {
+      error:
+        "Invalid TeraBox URL",
+      list: [],
+    };
+  }
+
+  const cookies =
+    getCookies();
 
   console.log(
     "[TERABOX] Cookies loaded:",
     Object.keys(cookies),
   );
-
-  /*
-   * Try current domains one by one.
-   *
-   * dm.terabox.app is preferred.
-   * 1024tera.com and terabox.com are fallbacks.
-   */
 
   const hosts = [
     {
@@ -322,29 +650,32 @@ export async function tera(
       api: "dm.terabox.app",
     },
     {
-      page: "www.1024tera.com",
-      api: "www.1024tera.com",
-    },
-    {
       page: "www.terabox.com",
       api: "www.terabox.com",
+    },
+    {
+      page: "www.1024tera.com",
+      api: "www.1024tera.com",
     },
   ];
 
   let lastError =
     "TeraBox returned an empty file list";
 
-  for (const host of hosts) {
+  for (
+    const host of hosts
+  ) {
     console.log(
       `[TERABOX] Trying ${host.page}`,
     );
 
     try {
-      const page = await getSharePage(
-        host.page,
-        surl,
-        cookies,
-      );
+      const page =
+        await getSharePage(
+          host.page,
+          input,
+          cookies,
+        );
 
       if (!page) {
         console.log(
@@ -354,7 +685,11 @@ export async function tera(
         continue;
       }
 
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (
+        let attempt = 1;
+        attempt <= 3;
+        attempt++
+      ) {
         console.log(
           `[TERABOX] Share request attempt ${attempt}/3`,
         );
@@ -369,45 +704,208 @@ export async function tera(
             );
 
           const normalized =
-            normalizeResponse(result);
-
-          if (
-            normalized &&
-            Array.isArray(normalized.list) &&
-            normalized.list.length > 0
-          ) {
-            console.log(
-              `[TERABOX] SUCCESS via ${host.api}`,
+            normalizeResponse(
+              result,
             );
 
-            return normalized;
-          }
-
-          if (normalized?.errno !== undefined) {
-            lastError =
-              `TeraBox errno: ${normalized.errno}`;
-
-            console.log(
-              "[TERABOX] errno:",
-              normalized.errno,
-            );
-          }
-
-          if (normalized?.errmsg) {
-            lastError = normalized.errmsg;
-          }
-
           if (
-            normalized?.message
+            !normalized
           ) {
             lastError =
-              normalized.message;
+              "Empty TeraBox API response";
+
+            continue;
           }
+
+          const files =
+            Array.isArray(
+              normalized.list,
+            )
+              ? normalized.list
+              : [];
 
           console.log(
-            "[TERABOX] Empty file list",
+            "[TERABOX] Files found:",
+            files.length,
           );
-        } catch (error: any) {
+
+          if (
+            files.length === 0
+          ) {
+            lastError =
+              normalized?.errmsg ||
+              normalized?.message ||
+              `TeraBox errno: ${
+                normalized?.errno ??
+                "unknown"
+              }`;
+
+            continue;
+          }
+
+          // --------------------------------------------
+          // DIRECT DLINK ALREADY AVAILABLE
+          // --------------------------------------------
+
+          const directFiles =
+            files.map(
+              (file: any) => ({
+                ...file,
+                download:
+                  file?.download ||
+                  file?.dlink ||
+                  null,
+              }),
+            );
+
+          let allHaveLinks =
+            directFiles.every(
+              (file: any) =>
+                !!file.download,
+            );
+
+          // --------------------------------------------
+          // GENERATE DLINK WHEN dlink IS NULL
+          // --------------------------------------------
+
+          if (!allHaveLinks) {
+            console.log(
+              "[TERABOX] dlink missing. Generating download link...",
+            );
+
+            for (
+              const file of directFiles
+            ) {
+              if (
+                file.download
+              ) {
+                continue;
+              }
+
+              const dlink =
+                await requestDownloadLink(
+                  host.api,
+                  page.jsToken,
+                  file,
+                  {
+                    ...normalized,
+                    shorturl:
+                      page.shortUrl,
+                    shortUrl:
+                      page.shortUrl,
+                  },
+                  cookies,
+                );
+
+              if (dlink) {
+                file.download =
+                  dlink;
+
+                file.dlink =
+                  dlink;
+
+                console.log(
+                  "[TERABOX] Download link generated successfully",
+                );
+              } else {
+                console.log(
+                  "[TERABOX] Could not generate dlink for:",
+                  file?.server_filename ||
+                    file?.filename ||
+                    file?.name,
+                );
+              }
+            }
+          }
+
+          // --------------------------------------------
+          // FINAL RESPONSE
+          // --------------------------------------------
+
+          const finalFiles =
+            directFiles.map(
+              (file: any) => ({
+                ...file,
+
+                filename:
+                  file?.filename ||
+                  file?.server_filename ||
+                  file?.name ||
+                  "TeraBox File",
+
+                size:
+                  file?.size ??
+                  0,
+
+                fs_id:
+                  file?.fs_id ??
+                  file?.fid ??
+                  null,
+
+                download:
+                  file?.download ||
+                  file?.dlink ||
+                  null,
+
+                dlink:
+                  file?.dlink ||
+                  file?.download ||
+                  null,
+              }),
+            );
+
+          const hasAnyDownload =
+            finalFiles.some(
+              (file: any) =>
+                !!file.download,
+            );
+
+          if (
+            hasAnyDownload
+          ) {
+            console.log(
+              "[TERABOX] =================================",
+            );
+
+            console.log(
+              "[TERABOX] FINAL SUCCESS",
+            );
+
+            console.log(
+              "[TERABOX] Files:",
+              finalFiles.length,
+            );
+
+            console.log(
+              "[TERABOX] =================================",
+            );
+
+            return {
+              ...normalized,
+              list:
+                finalFiles,
+              files:
+                finalFiles,
+              status:
+                "success",
+              url: input,
+              surl:
+                page.shortUrl,
+            };
+          }
+
+          // File exists but TeraBox did not
+          // provide a downloadable link.
+          lastError =
+            "TeraBox found the file, but did not return a download link.";
+
+          console.log(
+            "[TERABOX]",
+            lastError,
+          );
+        } catch (
+          error: any
+        ) {
           lastError =
             error?.message ||
             String(error);
@@ -418,11 +916,15 @@ export async function tera(
           );
         }
 
-        if (attempt < 3) {
-          await sleep(700);
+        if (
+          attempt < 3
+        ) {
+          await sleep(800);
         }
       }
-    } catch (error: any) {
+    } catch (
+      error: any
+    ) {
       lastError =
         error?.message ||
         String(error);
@@ -440,7 +942,10 @@ export async function tera(
   );
 
   return {
+    status: "error",
     error: lastError,
+    message: lastError,
     list: [],
+    files: [],
   };
 }
