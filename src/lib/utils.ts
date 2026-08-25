@@ -3,26 +3,31 @@ import path from "path";
 import { URL } from "url";
 
 export const ALLOWED_HOSTS = new Set([
-  // TeraBox
   "terabox.com",
   "www.terabox.com",
+
   "terabox.app",
   "www.terabox.app",
-  "dm.terabox.app",
 
-  // TeraShare / sharing domains
-  "terasharefile.com",
-  "www.terasharefile.com",
-  "teraboxshare.com",
-  "www.teraboxshare.com",
-  "teraboxlink.com",
-  "www.teraboxlink.com",
   "1024terabox.com",
   "www.1024terabox.com",
 
-  // Other TeraBox domains
-  "teraboxurl.com",
-  "www.teraboxurl.com",
+  "teraboxshare.com",
+  "www.teraboxshare.com",
+
+  "teraboxlink.com",
+  "www.teraboxlink.com",
+
+  "terasharefile.com",
+  "www.terasharefile.com",
+
+  "terafileshare.com",
+  "www.terafileshare.com",
+
+  "terasharelink.com",
+  "www.terasharelink.com",
+
+  "dm.terabox.app",
 ]);
 
 export function loadCookies(): Record<string, string> {
@@ -37,9 +42,7 @@ export function loadCookies(): Record<string, string> {
       const trimmed = cookieJson.trim();
 
       if (trimmed) {
-        data = {
-          ndus: trimmed,
-        };
+        data = { ndus: trimmed };
       }
     }
   }
@@ -50,9 +53,7 @@ export function loadCookies(): Record<string, string> {
     if (raw) {
       try {
         data = JSON.parse(raw);
-      } catch {
-        data = null;
-      }
+      } catch {}
     }
   }
 
@@ -61,45 +62,36 @@ export function loadCookies(): Record<string, string> {
 
     if (filePath) {
       try {
-        const resolvedPath = path.resolve(filePath);
+        const resolved = path.resolve(filePath);
 
-        if (fs.existsSync(resolvedPath)) {
-          const fileContent = fs.readFileSync(
-            resolvedPath,
-            "utf-8",
-          );
-
-          data = JSON.parse(fileContent);
+        if (fs.existsSync(resolved)) {
+          const content = fs.readFileSync(resolved, "utf8");
+          data = JSON.parse(content);
         }
-      } catch {
-        data = null;
-      }
+      } catch {}
     }
   }
 
-  if (data && typeof data === "object") {
-    const result: Record<string, string> = {};
-
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined && value !== null) {
-        result[key] = String(value);
-      }
-    }
-
-    return result;
+  if (!data || typeof data !== "object") {
+    return {};
   }
 
-  return {};
+  const result: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== undefined && value !== null) {
+      result[key] = String(value);
+    }
+  }
+
+  return result;
 }
 
 export function isValidShareUrl(input: string): boolean {
   try {
     const parsed = new URL(input.trim());
 
-    if (
-      parsed.protocol !== "http:" &&
-      parsed.protocol !== "https:"
-    ) {
+    if (!["http:", "https:"].includes(parsed.protocol)) {
       return false;
     }
 
@@ -109,27 +101,15 @@ export function isValidShareUrl(input: string): boolean {
       return false;
     }
 
-    // /s/xxxxxx
-    if (/\/s\/[^/?#]+/i.test(parsed.pathname)) {
-      return true;
-    }
+    const pathname = parsed.pathname.toLowerCase();
 
-    // ?surl=xxxxxx
-    if (parsed.searchParams.get("surl")) {
-      return true;
-    }
+    const hasPathShare = /\/s\/[a-zA-Z0-9_-]+/.test(pathname);
 
-    // /share/xxxxxx
-    if (/\/share\/[^/?#]+/i.test(parsed.pathname)) {
-      return true;
-    }
+    const hasSurl =
+      parsed.searchParams.has("surl") &&
+      !!parsed.searchParams.get("surl");
 
-    // /wap/share/xxxxxx
-    if (/\/wap\/share\/[^/?#]+/i.test(parsed.pathname)) {
-      return true;
-    }
-
-    return false;
+    return hasPathShare || hasSurl;
   } catch {
     return false;
   }
@@ -139,38 +119,20 @@ export function extractSurl(input: string): string | null {
   try {
     const parsed = new URL(input.trim());
 
-    // ?surl=xxxxxx
-    const surlParam = parsed.searchParams.get("surl");
+    // ?surl=xxxx
+    const querySurl = parsed.searchParams.get("surl");
 
-    if (surlParam) {
-      return surlParam.trim();
+    if (querySurl) {
+      return querySurl.trim();
     }
 
-    // /s/xxxxxx
-    const shareMatch = parsed.pathname.match(
-      /\/s\/([^/?#]+)/i,
+    // /s/xxxx
+    const match = parsed.pathname.match(
+      /\/s\/([a-zA-Z0-9_-]+)/i,
     );
 
-    if (shareMatch?.[1]) {
-      return shareMatch[1].trim();
-    }
-
-    // /share/xxxxxx
-    const shareMatch2 = parsed.pathname.match(
-      /\/share\/([^/?#]+)/i,
-    );
-
-    if (shareMatch2?.[1]) {
-      return shareMatch2[1].trim();
-    }
-
-    // /wap/share/xxxxxx
-    const shareMatch3 = parsed.pathname.match(
-      /\/wap\/share\/([^/?#]+)/i,
-    );
-
-    if (shareMatch3?.[1]) {
-      return shareMatch3[1].trim();
+    if (match?.[1]) {
+      return match[1];
     }
 
     return null;
@@ -179,21 +141,47 @@ export function extractSurl(input: string): string | null {
   }
 }
 
+export function normalizeSurl(value: string): {
+  surlParam: string;
+  shortUrl: string;
+} {
+  let key = value.trim();
+
+  key = key.replace(/^\/+|\/+$/g, "");
+
+  /*
+   * TeraBox shares can appear with a leading "1".
+   * Keep both versions available because different
+   * endpoints expect different forms.
+   */
+
+  if (key.startsWith("1") && key.length > 1) {
+    return {
+      surlParam: key,
+      shortUrl: key.substring(1),
+    };
+  }
+
+  return {
+    surlParam: `1${key}`,
+    shortUrl: key,
+  };
+}
+
 export function formatBytes(
   bytes: number | string,
   decimals = 2,
 ): string {
-  const b =
+  const value =
     typeof bytes === "string"
-      ? Number.parseInt(bytes, 10)
-      : bytes;
+      ? Number(bytes)
+      : Number(bytes);
 
-  if (!Number.isFinite(b) || b <= 0) {
+  if (!Number.isFinite(value) || value <= 0) {
     return "0 Bytes";
   }
 
   const k = 1024;
-  const dm = Math.max(0, decimals);
 
   const sizes = [
     "Bytes",
@@ -203,15 +191,17 @@ export function formatBytes(
     "TB",
     "PB",
     "EB",
-    "ZB",
-    "YB",
   ];
 
   const i = Math.floor(
-    Math.log(b) / Math.log(k),
+    Math.log(value) / Math.log(k),
   );
 
-  return `${Number(
-    (b / Math.pow(k, i)).toFixed(dm),
-  )} ${sizes[i]}`;
+  const index = Math.min(i, sizes.length - 1);
+
+  return `${parseFloat(
+    (value / Math.pow(k, index)).toFixed(
+      decimals < 0 ? 0 : decimals,
+    ),
+  )} ${sizes[index]}`;
 }
