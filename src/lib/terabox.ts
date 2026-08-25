@@ -1,56 +1,18 @@
-import { loadCookies } from "./utils";
+import {
+  loadCookies,
+  normalizeSurl,
+} from "./utils";
 
-function extractShortUrl(value: string): {
-  surlParam: string;
-  shortUrl: string;
-} {
-  const input = value.trim();
-
-  let key = input;
-
-  try {
-    const parsed = new URL(input);
-
-    const surl = parsed.searchParams.get("surl");
-
-    if (surl) {
-      key = surl.trim();
-    } else {
-      const match = parsed.pathname.match(
-        /\/s\/([^/?#]+)/i,
-      );
-
-      if (match?.[1]) {
-        key = match[1].trim();
-      }
-    }
-  } catch {
-    // Input is already treated as a shorturl.
-  }
-
-  // TeraBox external links commonly use /s/1XXXX.
-  // The leading "1" is not sent as the shorturl.
-  const shortUrl = key.startsWith("1")
-    ? key.substring(1)
-    : key;
-
-  const surlParam = key.startsWith("1")
-    ? key
-    : `1${key}`;
-
-  return {
-    surlParam,
-    shortUrl,
-  };
-}
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
 function extractJsToken(html: string): string | null {
   const patterns = [
     /fn%28%22(.*?)%22%29/,
-    /fn\("([^"]+)"\)/,
-    /jsToken\s*=\s*["']([^"']+)["']/,
-    /jsToken["']?\s*:\s*["']([^"']+)["']/,
-    /window\.jsToken\s*=\s*["']([^"']+)["']/,
+    /fn\(["']([^"']+)["']\)/,
+    /jsToken\s*[:=]\s*["']([^"']+)["']/i,
+    /["']jsToken["']\s*[:=]\s*["']([^"']+)["']/i,
+    /window\.jsToken\s*=\s*["']([^"']+)["']/i,
   ];
 
   for (const pattern of patterns) {
@@ -64,96 +26,91 @@ function extractJsToken(html: string): string | null {
   return null;
 }
 
+function makeCookieHeader(
+  cookies: Record<string, string>,
+): string {
+  return Object.entries(cookies)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("; ");
+}
+
 export async function tera(
   surl: string,
 ): Promise<any> {
-  const { surlParam, shortUrl } =
-    extractShortUrl(surl);
-
-  console.log("[DEBUG] Input:", surl);
-  console.log("[DEBUG] surlParam:", surlParam);
-  console.log("[DEBUG] shortUrl:", shortUrl);
-
-  const cookies = loadCookies();
-
-  const ndusCookie = cookies["ndus"];
-
-  const cookieString = ndusCookie
-    ? `ndus=${ndusCookie}`
-    : "";
-
-  const userAgent =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-    "Chrome/145.0.0.0 Safari/537.36";
-
-  const pageHeaders: Record<string, string> = {
-    "User-Agent": userAgent,
-    Accept:
-      "text/html,application/xhtml+xml," +
-      "application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-  };
-
-  if (cookieString) {
-    pageHeaders["Cookie"] = cookieString;
-  }
-
-  const firstUrl =
-    `https://dm.terabox.app/sharing/link` +
-    `?surl=${encodeURIComponent(surlParam)}`;
-
-  console.log(
-    "[DEBUG] Fetching:",
-    firstUrl,
-  );
-
   try {
-    const response = await fetch(firstUrl, {
-      method: "GET",
-      headers: pageHeaders,
-      redirect: "follow",
-    });
+    const { surlParam, shortUrl } =
+      normalizeSurl(surl);
 
     console.log(
-      "[DEBUG] Page status:",
-      response.status,
+      "[TERABOX] surlParam:",
+      surlParam,
     );
-
-    const html = await response.text();
 
     console.log(
-      "[DEBUG] HTML length:",
-      html.length,
+      "[TERABOX] shortUrl:",
+      shortUrl,
     );
 
-    if (!response.ok) {
+    const cookies = loadCookies();
+
+    const cookieHeader =
+      makeCookieHeader(cookies);
+
+    const pageUrl =
+      `https://dm.terabox.app/sharing/link?surl=${encodeURIComponent(
+        surlParam,
+      )}`;
+
+    const pageResponse = await fetch(
+      pageUrl,
+      {
+        method: "GET",
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language":
+            "en-US,en;q=0.9",
+          ...(cookieHeader
+            ? { Cookie: cookieHeader }
+            : {}),
+        },
+      },
+    );
+
+    console.log(
+      "[TERABOX] page status:",
+      pageResponse.status,
+    );
+
+    const html =
+      await pageResponse.text();
+
+    if (!pageResponse.ok) {
       return {
         error:
-          `TeraBox page returned HTTP ${response.status}`,
+          `TeraBox page returned HTTP ${pageResponse.status}`,
       };
     }
 
-    const jsToken = extractJsToken(html);
+    const jsToken =
+      extractJsToken(html);
 
     if (!jsToken) {
-      console.log(
-        "[DEBUG] jsToken was not found.",
-      );
-
       return {
         error:
-          "Failed to extract jsToken from TeraBox share page.",
+          "Could not extract jsToken from TeraBox share page. TeraBox verification may be blocking the request.",
       };
     }
 
     console.log(
-      "[DEBUG] jsToken extracted successfully.",
+      "[TERABOX] jsToken extracted",
     );
 
-    const apiUrl = new URL(
-      "https://dm.terabox.app/share/list",
-    );
+    const apiUrl =
+      new URL(
+        "https://dm.terabox.app/share/list",
+      );
 
     apiUrl.searchParams.set(
       "app_id",
@@ -180,96 +137,81 @@ export async function tera(
       "1",
     );
 
-    const apiHeaders: Record<string, string> = {
-      "User-Agent": userAgent,
-      Accept:
-        "application/json, text/plain, */*",
-      "Accept-Language":
-        "en-US,en;q=0.9",
-      "X-Requested-With":
-        "XMLHttpRequest",
-      Referer: firstUrl,
-      Origin:
-        "https://dm.terabox.app",
-    };
-
-    if (cookieString) {
-      apiHeaders["Cookie"] =
-        cookieString;
-    }
-
-    console.log(
-      "[DEBUG] Calling share/list...",
-    );
-
     const apiResponse = await fetch(
       apiUrl.toString(),
       {
         method: "GET",
-        headers: apiHeaders,
-        redirect: "follow",
+        headers: {
+          Host: "dm.terabox.app",
+          "User-Agent": USER_AGENT,
+          Accept:
+            "application/json, text/plain, */*",
+          "Accept-Language":
+            "en-US,en;q=0.9",
+          "X-Requested-With":
+            "XMLHttpRequest",
+          Referer: pageUrl,
+          Origin:
+            "https://dm.terabox.app",
+          ...(cookieHeader
+            ? { Cookie: cookieHeader }
+            : {}),
+        },
       },
     );
 
     console.log(
-      "[DEBUG] share/list status:",
+      "[TERABOX] API status:",
       apiResponse.status,
     );
 
-    const raw = await apiResponse.text();
+    const responseText =
+      await apiResponse.text();
 
-    console.log(
-      "[DEBUG] API response length:",
-      raw.length,
-    );
+    if (!apiResponse.ok) {
+      return {
+        error:
+          `TeraBox API returned HTTP ${apiResponse.status}`,
+        raw:
+          responseText.substring(0, 500),
+      };
+    }
 
     let data: any;
 
     try {
-      data = JSON.parse(raw);
+      data = JSON.parse(responseText);
     } catch {
       return {
         error:
-          "TeraBox returned a non-JSON response.",
-        http_status:
-          apiResponse.status,
+          "TeraBox returned an invalid JSON response.",
+        raw:
+          responseText.substring(0, 500),
       };
     }
 
     console.log(
-      "[DEBUG] API errno:",
+      "[TERABOX] API errno:",
       data?.errno,
     );
 
     if (
       data?.errno !== undefined &&
-      data.errno !== 0
+      Number(data.errno) !== 0
     ) {
       return {
+        ...data,
         error:
-          data?.show_msg ||
-          data?.message ||
-          `TeraBox API error: ${data.errno}`,
-        errno: data.errno,
-        data,
-      };
-    }
-
-    if (
-      !data?.list ||
-      !Array.isArray(data.list)
-    ) {
-      return {
-        error:
-          "TeraBox returned no file list.",
-        data,
+          data.errmsg ||
+          data.message ||
+          `TeraBox errno ${data.errno}`,
       };
     }
 
     return data;
   } catch (error: any) {
     console.error(
-      "[DEBUG] tera() error:",
+      "[TERABOX] Exception:",
       error,
     );
 
